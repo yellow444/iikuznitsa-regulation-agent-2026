@@ -1,0 +1,23 @@
+FROM python:3.13-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2 \
+    CORPUS_DIR=/opt/demo/corpus E5_MODEL_DIR=/opt/demo/model QUALITY_DB=/opt/demo/state/quality.sqlite3 \
+    PUBLIC_DEMO=1
+
+WORKDIR /app
+COPY requirements.txt requirements-semantic.txt ./
+RUN pip install --no-cache-dir -r requirements-semantic.txt
+COPY app.py retrieval.py semantic.py index.html prepare_assets.py ./
+
+FROM runtime AS encoder
+RUN pip install --no-cache-dir onnx==1.20.1 \
+    && python prepare_assets.py --model /opt/demo/model --split-embeddings
+
+FROM runtime
+COPY --from=encoder /opt/demo/model /opt/demo/model
+RUN useradd --create-home --uid 1000 demo \
+    && install -d -o demo -g demo /opt/demo/corpus /opt/demo/state
+
+USER demo
+EXPOSE 7860
+CMD ["sh", "-c", "python prepare_assets.py --corpus /opt/demo/corpus && exec python -m uvicorn app:app --host 0.0.0.0 --port 7860"]

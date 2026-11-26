@@ -35,20 +35,68 @@ def fetch(url, target, valid):
     staged.replace(target)
 
 
-def main(corpus, model):
+def prepare_corpus(corpus):
     for filename, (_, file_id) in SOURCES.items():
         fetch(
             f"https://drive.google.com/uc?export=download&id={file_id}",
             corpus / filename,
             lambda path: sha256(path.read_bytes()).hexdigest() == DOCUMENT_HASHES[filename],
         )
+
+
+def prepare_model(model):
     for filename, (remote, size) in MODEL_FILES.items():
         fetch(f"{MODEL_ORIGIN}/{remote}", model / filename, lambda path: path.stat().st_size == size)
 
 
+def split_embeddings(model):
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    # Move the quantized lookup table to a file that the runtime can memory-map.
+    model_path = model / "model.onnx"
+    encoder = onnx.load(model_path)
+    graph = encoder.graph
+    tensor_name = "embeddings.word_embeddings.weight_quantized"
+    weights = next(tensor for tensor in graph.initializer if tensor.name == tensor_name)
+    gather, = (node for node in graph.node if tensor_name in node.input)
+    lookup_input = "/embeddings/word_embeddings/Gather_output_0_quantized"
+    if (
+        gather.op_type != "Gather"
+        or list(gather.input) != [tensor_name, "input_ids"]
+        or list(gather.output) != [lookup_input]
+        or any((attr.name, attr.i) != ("axis", 0) for attr in gather.attribute)
+    ):
+        raise ValueError("Unexpected graph layout for the word embedding lookup.")
+    table = numpy_helper.to_array(weights)
+    if table.dtype != np.uint8 or table.ndim != 2:
+        raise ValueError("Unexpected word embedding table type or shape.")
+    graph.input.append(helper.make_tensor_value_info(
+        lookup_input, TensorProto.UINT8, ["batch_size", "sequence_length", table.shape[1]]
+    ))
+    graph.node.remove(gather)
+    graph.initializer.remove(weights)
+    onnx.checker.check_model(encoder)
+    staged_model = model_path.with_suffix(".part")
+    np.save(model / "word_embeddings.npy", table, allow_pickle=False)
+    onnx.save(encoder, staged_model)
+    staged_model.replace(model_path)
+
+
 if __name__ == "__main__":
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument("--corpus", required=True, type=Path)
-    parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--corpus", type=Path)
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--split-embeddings", action="store_true")
     args = parser.parse_args()
-    main(args.corpus, args.model)
+    if not (args.corpus or args.model):
+        parser.error("Specify --corpus, --model or both.")
+    if args.split_embeddings and not args.model:
+        parser.error("--split-embeddings requires --model.")
+    if args.corpus:
+        prepare_corpus(args.corpus)
+    if args.model:
+        prepare_model(args.model)
+        if args.split_embeddings:
+            split_embeddings(args.model)
