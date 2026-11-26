@@ -116,6 +116,12 @@
           for (const option of (data.conditions || [])) {
             append(result, 'button', option).onclick = () => ask(question, scope, option);
           }
+          for (const item of (data.questions || [])) {
+            append(result, 'button', item).onclick = () => {
+              byId('question').value = item;
+              ask(item, scope);
+            };
+          }
         } else if (data.state === 'confirm_approved') {
           append(result, 'h2', 'Есть похожий подтверждённый вопрос');
           append(result, 'p', 'Выберите, если он соответствует вашему случаю.');
