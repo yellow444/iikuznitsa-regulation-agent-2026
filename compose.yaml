@@ -1,0 +1,21 @@
+services:
+  stand:
+    image: iikuznitsa-stand:local
+    build: .
+    ports:
+      - "${STAND_BIND:-127.0.0.1}:${STAND_PORT:-18767}:8000"
+    environment:
+      QUALITY_TOKEN: "${QUALITY_TOKEN:?Set QUALITY_TOKEN for the quality desk}"
+    volumes:
+      - "${STAND_CORPUS:-../private-corpus}:/data/corpus:ro"
+      - "${STAND_MODEL:-./runtime/e5}:/data/model:ro"
+      - state:/data/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/catalog',timeout=3)); assert len(r['sources'])==4 and r['search']=='hybrid'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  state:

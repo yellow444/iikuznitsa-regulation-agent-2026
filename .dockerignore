@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.txt
+!requirements-semantic.txt
+!app.py
+!retrieval.py
+!semantic.py
+!index.html

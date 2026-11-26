@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Поиск по регламентам</title>
+  <style>
+    :root { font: 16px/1.5 system-ui, sans-serif; background: #f3f1eb; color: #222820; }
+    * { box-sizing: border-box; }
+    body { max-width: 820px; margin: auto; padding: 48px 24px; }
+    h1 { font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.1; margin: 0 0 24px; }
+    section, article, details { background: #fffefa; border: 1px solid #d9ddd3; padding: 20px; margin: 16px 0; border-radius: 15px; }
+    label, textarea, select, input { display: block; width: 100%; }
+    label { margin: 12px 0 5px; font-weight: 600; }
+    textarea, select, input, button { border: 1px solid #aab2a6; border-radius: 8px; padding: 10px 12px; font: inherit; }
+    textarea { resize: vertical; }
+    button { background: #1e4d37; color: white; cursor: pointer; margin: 10px 8px 0 0; }
+    button:disabled { opacity: .6; cursor: wait; }
+    a { color: #1e4d37; }
+    blockquote { margin: 12px 0; padding-left: 12px; border-left: 3px solid #769581; white-space: pre-wrap; overflow-wrap: anywhere; }
+    summary { cursor: pointer; font-weight: 650; }
+    .muted { color: #505b52; }
+    .process { display: flex; flex-wrap: wrap; gap: 6px 22px; list-style: none; padding: 0; }
+    .process li { position: relative; background: #e8f0e7; border-radius: 7px; padding: 5px 9px; }
+    .process li + li::before { content: '→'; position: absolute; left: -18px; }
+    .citation { margin: 10px 0; padding: 12px; background: #f4f5ee; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Поиск по регламентам</h1>
+    <p class="muted" id="catalog">Проверяем доступность регламентов…</p>
+    <p class="muted" id="demo-note" hidden>Публичное демо на примерах заказчика. Используйте учебные вопросы без персональных данных.</p>
+  </header>
+  <main>
+    <section aria-label="Задать вопрос">
+      <form id="inquiry">
+        <label for="question">Вопрос сотрудника</label>
+        <textarea id="question" required minlength="4" maxlength="1400" rows="3" placeholder="Кто отвечает за управление рисками проекта?"></textarea>
+        <label for="scope">Регламент или процесс</label>
+        <select id="scope"><option value="">Все регламенты</option></select>
+        <button id="ask">Найти ответ</button>
+      </form>
+      <div id="result" aria-live="polite"></div>
+    </section>
+    <details>
+      <summary>Служба качества</summary>
+      <label for="token">Ключ доступа</label>
+      <input id="token" type="password" autocomplete="off">
+      <button id="queue" type="button">Открыть обращения</button>
+      <div id="requests" aria-live="polite"></div>
+    </details>
+  </main>
+  <script>
+    const byId = id => document.getElementById(id);
+    const result = byId('result');
+    const requests = byId('requests');
+    let sources = [];
+
+    function append(parent, tag, value) {
+      const element = document.createElement(tag);
+      if (value !== undefined) element.textContent = value;
+      parent.append(element);
+      return element;
+    }
+
+    function showProcess(parent, labels, title) {
+      const list = append(parent, 'ol');
+      list.className = 'process';
+      list.setAttribute('aria-label', title);
+      for (const label of labels) append(list, 'li', label);
+    }
+
+    async function api(url, body, token) {
+      const headers = {'Content-Type': 'application/json'};
+      if (token) headers['X-Quality-Token'] = token;
+      const response = await fetch(url, {
+        method: body ? 'POST' : 'GET', headers,
+        body: body && JSON.stringify(body)
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'Проверьте введённые данные.');
+      return data;
+    }
+
+    async function ask(question, scope, condition, suggestApproved = true) {
+      const submit = byId('ask');
+      submit.disabled = true;
+      result.replaceChildren();
+      append(result, 'p', 'Проверяем регламенты…');
+      try {
+        const data = await api('/api/ask', {question, scope, condition, suggest_approved: suggestApproved});
+        result.replaceChildren();
+        if (data.state === 'answer') {
+          append(result, 'h2', 'По регламенту');
+          if (data.process === 'rejected_project') {
+            showProcess(result, ['Отклонён', 'Изменить статус на «Новый»', 'Дополнить карточку'],
+              'Возврат проекта в работу по п. 2.4');
+          }
+          for (const item of data.evidence) {
+            const citation = append(result, 'div');
+            citation.className = 'citation';
+            append(citation, 'blockquote', item.quote);
+            const source = append(citation, 'a', item.source);
+            source.href = item.url;
+            source.target = '_blank';
+            source.rel = 'noopener noreferrer';
+            append(citation, 'p', item.section);
+          }
+        } else if (data.state === 'clarify') {
+          append(result, 'h2', 'Уточните процесс');
+          append(result, 'p', data.prompt || 'Вопрос относится к нескольким регламентам. Для какого процесса нужен ответ?');
+          for (const option of (data.options || [])) {
+            append(result, 'button', option).onclick = () => ask(question, option, condition);
+          }
+          for (const option of (data.conditions || [])) {
+            append(result, 'button', option).onclick = () => ask(question, scope, option);
+          }
+        } else if (data.state === 'confirm_approved') {
+          append(result, 'h2', 'Есть похожий подтверждённый вопрос');
+          append(result, 'p', 'Выберите, если он соответствует вашему случаю.');
+          for (const item of data.suggestions) {
+            append(result, 'button', `${item.question} · ${item.source}`).onclick =
+              () => ask(item.question, item.scope, undefined, false);
+          }
+          append(result, 'button', 'У меня другой вопрос').onclick =
+            () => ask(question, scope, condition, false);
+        } else if (data.state === 'approved') {
+          append(result, 'h2', 'Ответ службы качества');
+          showProcess(result, ['Обращение', 'Проверено службой качества', 'Ответ в базе знаний'],
+            'Маршрут утверждённого ответа');
+          append(result, 'blockquote', data.answer);
+          append(result, 'p', `Обращение №${data.id} · ${data.source} · ${data.reference}`);
+          if (data.url) {
+            const source = append(result, 'a', 'Открыть связанный регламент');
+            source.href = data.url;
+            source.target = '_blank';
+            source.rel = 'noopener noreferrer';
+          }
+        } else {
+          append(result, 'h2', 'Нужно уточнение службы качества');
+          showProcess(result, ['Пробел в регламенте', 'Обращение создано', 'Ожидается ответ'],
+            'Маршрут обращения');
+          append(result, 'p', `Подтверждённого ответа в регламентах недостаточно. Обращение №${data.id} добавлено в очередь. После рассмотрения задайте тот же вопрос ещё раз.`);
+        }
+      } catch (error) {
+        result.replaceChildren();
+        append(result, 'p', error.message);
+      } finally {
+        submit.disabled = false;
+      }
+    }
+
+    byId('inquiry').addEventListener('submit', event => {
+      event.preventDefault();
+      ask(byId('question').value, byId('scope').value);
+    });
+
+    async function loadQueue() {
+      requests.replaceChildren();
+      try {
+        const list = await api('/api/quality', null, byId('token').value);
+        if (!list.length) append(requests, 'p', 'Обращений пока нет.');
+        for (const item of list) {
+          const box = append(requests, 'article');
+          append(box, 'strong', `№${item.id} · ${item.question}`);
+          if (item.resolved_at) {
+            append(box, 'p', item.answer);
+            continue;
+          }
+          const form = append(box, 'form');
+          const source = append(form, 'select');
+          source.setAttribute('aria-label', 'Связанный регламент');
+          for (const label of (item.scope ? [item.scope] : sources)) append(source, 'option', label);
+          const reference = append(form, 'input');
+          reference.placeholder = 'Пункт или тема связанного регламента';
+          reference.setAttribute('aria-label', reference.placeholder);
+          reference.required = true;
+          reference.minLength = 3;
+          reference.maxLength = 240;
+          const answer = append(form, 'textarea');
+          answer.placeholder = 'Подтверждённый ответ';
+          answer.setAttribute('aria-label', answer.placeholder);
+          answer.required = true;
+          answer.minLength = 10;
+          answer.maxLength = 3000;
+          const save = append(form, 'button', 'Подтвердить и добавить в базу');
+          const message = append(form, 'p');
+          form.onsubmit = async event => {
+            event.preventDefault();
+            save.disabled = true;
+            try {
+              await api(`/api/quality/${item.id}`, {
+                source: source.value, reference: reference.value, answer: answer.value
+              }, byId('token').value);
+              await loadQueue();
+            } catch (error) {
+              message.textContent = error.message;
+              save.disabled = false;
+            }
+          };
+        }
+      } catch (error) {
+        append(requests, 'p', error.message);
+      }
+    }
+
+    byId('queue').onclick = loadQueue;
+    api('/api/catalog').then(data => {
+      sources = data.sources;
+      byId('demo-note').hidden = !data.public_demo;
+      for (const source of sources) append(byId('scope'), 'option', source);
+      byId('catalog').textContent = sources.length ? sources.join(' / ') : 'Регламенты ещё не загружены.';
+    }).catch(() => { byId('catalog').textContent = 'Каталог недоступен.'; });
+  </script>
+</body>
+</html>

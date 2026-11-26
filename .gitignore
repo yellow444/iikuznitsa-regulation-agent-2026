@@ -1,0 +1,6 @@
+runtime/
+private-corpus/
+__pycache__/
+.venv/
+.env
+*.sqlite3
