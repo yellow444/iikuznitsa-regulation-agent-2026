@@ -27,6 +27,12 @@ COMPOUND = re.compile(
     re.IGNORECASE,
 )
 LIST_REQUEST = re.compile(r"\b(?:какие|перечень|список|состав|комплект|приложить)\b", re.IGNORECASE)
+OTHERWISE = re.compile(
+    r"(?<=\.)\s+(?=(?:В иных случаях|В остальных случаях|В противном случае|Иначе)\b)",
+    re.IGNORECASE,
+)
+CONDITION_START = re.compile(r"^(?:если|в случае|когда)\s+", re.IGNORECASE)
+CONDITION_ONLY = re.compile(r"\bтолько\s+(.+)", re.IGNORECASE)
 
 
 def terms(value: str) -> set[str]:
@@ -52,6 +58,55 @@ class Passage:
     section: str
     quote: str
     url: str
+
+
+def conditional_answer(passage: Passage, question: str, choice: str | None) -> dict | None:
+    """Apply a document's explicit condition and fallback pair."""
+    clauses = OTHERWISE.split(passage.quote)
+    if len(clauses) != 2:
+        return None
+    primary, fallback = clauses
+    body = re.sub(r"^\d+(?:\.\d+)*[.)]?\s+", "", primary)
+    if CONDITION_START.match(body):
+        # A nested «когда/если» in the opening condition introduces the deciding detail.
+        antecedent = re.split(r",\s+(?:когда|если)\s+", body, maxsplit=1, flags=re.IGNORECASE)
+        condition, delimiter, _ = CONDITION_START.sub("", antecedent[-1]).partition(", ")
+        if not delimiter:
+            return None
+    else:
+        only = CONDITION_ONLY.search(body)
+        if not only:
+            return None
+        condition = only[1]
+    condition = condition.rstrip(".")
+    if not condition:
+        return None
+    if choice == "Не знаю":
+        return {"state": "missing", "branch_condition": condition}
+    if choice not in {"Да", "Нет"}:
+        normalized = condition.casefold().replace("ё", "е")
+        words = re.findall(r"[а-яa-z0-9]+", normalized)
+        anchors = [word for word in words if word != "не"]
+        if not anchors:
+            return None
+        # Only use explicit wording. Missing or changed details go through clarification.
+        pattern = r"\b(?:не\s+)?" + r"\s+(?:не\s+)?".join(map(re.escape, anchors)) + r"\b"
+        statement = " ".join(re.findall(r"[а-яa-z0-9]+", question.casefold().replace("ё", "е")))
+        opposite = []
+        if words.count("не") == 1:
+            opposite.append(anchors)
+        elif "не" not in words:
+            for index, word in enumerate(words):
+                if word in {"был", "была", "были", "было", "будет", "будут"}:
+                    opposite.append(words[:index] + ["не"] + words[index:])
+        matches = [match.split() for match in re.findall(pattern, statement)]
+        choices = {"Да" if match == words else "Нет" if match in opposite else None for match in matches}
+        if len(choices) != 1 or None in choices:
+            return {"state": "clarify", "prompt": f"Верно ли условие «{condition}»?",
+                    "conditions": ["Да", "Нет", "Не знаю"]}
+        choice = choices.pop()
+    return {"state": "answer", "evidence": [asdict(passage) | {"quote": primary if choice == "Да" else fallback}],
+            "branch_condition": condition, "branch_applies": choice == "Да"}
 
 
 def read_passages(path: Path, source: str, file_id: str) -> tuple[list[Passage], dict[Passage, list[str]]]:
@@ -209,6 +264,9 @@ class Catalog:
         if len(close) > 1:
             return {"state": "clarify", "options": close}
         passage = matches[close[0]][0][1]
+        branch = conditional_answer(passage, question, condition)
+        if branch is not None:
+            return branch
         evidence = [asdict(passage)]
         content = self.continuations.get(passage)
         if content and LIST_REQUEST.search(question):

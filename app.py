@@ -41,7 +41,7 @@ Answer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, 
 class Inquiry(BaseModel):
     question: Question
     scope: str | None = None
-    condition: Literal["Меняют", "Не меняют", "Не знаю"] | None = None
+    condition: Literal["Меняют", "Не меняют", "Да", "Нет", "Не знаю"] | None = None
     suggest_approved: bool = True
 
 
@@ -93,17 +93,59 @@ def approved_suggestions(db, question: str, scope: str):
         "SELECT question, source, scope FROM requests WHERE resolved_at IS NOT NULL AND scope = ? "
         "ORDER BY id DESC LIMIT 100", (scope,),
     )
+    guarded = quality_guards(question)
+    anchors = quality_anchors(question)
     matches = []
+    semantic_candidates = []
     for row in rows:
         candidate = terms(row["question"])
-        if query_numbers != set(number_pattern.findall(row["question"])):
+        if (query_numbers != set(number_pattern.findall(row["question"]))
+                or guarded != quality_guards(row["question"])):
             continue
         common = len(query & candidate)
         similarity = 2 * common / (len(query) + len(candidate))
         if common >= 2 and similarity >= 0.60:
             matches.append((similarity, dict(row)))
+        elif catalog.encoder is not None and len(anchors & quality_anchors(row["question"])) >= 2:
+            semantic_candidates.append(dict(row))
+    if semantic_candidates:
+        texts = [question, *(item["question"] for item in semantic_candidates)]
+        vectors = catalog.encoder.encode(texts, "query")
+        for score, item in zip(vectors[1:] @ vectors[0], semantic_candidates):
+            if score >= 0.84:
+                matches.append((float(score), item))
     matches.sort(key=lambda item: item[0], reverse=True)
     return [row for _, row in matches[:3]]
+
+
+QUALITY_GUARDS = {
+    "cancellation": r"отмен\w*|аннулир\w*|отзыв\w*|отозва\w*|откат\w*",
+    "transfer": (r"перенос\w*|перенес\w*|перенест\w*|переоформ\w*|перерегистр\w*|"
+                 r"перевод\w*|перевест\w*|перевед\w*|переда(?:ть|ча|чи|че|чу)"),
+    "activate": r"активировать|активаци\w*",
+    "nonactive": r"неактивир\w*|неактивн\w*|не\s+активир\w*",
+    "negative": r"не|нельзя|без|запрещ\w*|отказ\w*",
+    "deadline": r"срок\w*|дедлайн\w*",
+    "payment": r"оплат\w*|платеж\w*",
+}
+QUALITY_ANCHORS = {
+    "organization": r"юрлиц\w*|организаци\w*|компани\w*|юридическ\w*\s+лиц\w*",
+    "license": r"лицензи\w*|ключ\w*",
+    "contract": r"договор\w*|контракт\w*",
+    "access": r"доступ\w*|разрешени\w*",
+}
+
+
+def quality_guards(value: str) -> set[str]:
+    normalized = value.casefold().replace("ё", "е")
+    return {name for name, pattern in QUALITY_GUARDS.items()
+            if re.search(rf"\b(?:{pattern})\b", normalized)}
+
+
+def quality_anchors(value: str) -> set[str]:
+    normalized = value.casefold().replace("ё", "е")
+    return terms(value) | {name for name, pattern in QUALITY_ANCHORS.items()
+                           if re.search(rf"\b(?:{pattern})\b", normalized)}
 
 
 def authorize(token: str) -> None:

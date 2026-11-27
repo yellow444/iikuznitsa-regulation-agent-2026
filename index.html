@@ -93,6 +93,10 @@
         result.replaceChildren();
         if (data.state === 'answer') {
           append(result, 'h2', 'По регламенту');
+          if (data.branch_condition) {
+            const status = data.branch_applies ? 'Условие выполнено' : 'Условие не выполнено';
+            append(result, 'p', `${status}: ${data.branch_condition}`);
+          }
           if (data.process === 'rejected_project') {
             showProcess(result, ['Отклонён', 'Изменить статус на «Новый»', 'Дополнить карточку'],
               'Возврат проекта в работу по п. 2.4');
@@ -108,7 +112,7 @@
             append(citation, 'p', item.section);
           }
         } else if (data.state === 'clarify') {
-          append(result, 'h2', 'Уточните процесс');
+          append(result, 'h2', data.conditions ? 'Уточните условие' : 'Уточните процесс');
           append(result, 'p', data.prompt || 'Вопрос относится к нескольким регламентам. Для какого процесса нужен ответ?');
           for (const option of (data.options || [])) {
             append(result, 'button', option).onclick = () => ask(question, option, condition);
