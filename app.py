@@ -36,12 +36,14 @@ catalog = load_catalog()
 app = FastAPI(title="Регламент · поиск корпоративных знаний")
 Question = Annotated[str, StringConstraints(strip_whitespace=True, min_length=4, max_length=1400)]
 Answer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=3000)]
+TicketCondition = Literal["Меняют", "Не меняют", "Да", "Нет", "Не знаю"]
+CONDITION_SUFFIX = re.compile(r" \[Уточнение: (Меняют|Не меняют|Да|Нет|Не знаю)\]$")
 
 
 class Inquiry(BaseModel):
     question: Question
     scope: str | None = None
-    condition: Literal["Меняют", "Не меняют", "Да", "Нет", "Не знаю"] | None = None
+    condition: TicketCondition | None = None
     suggest_approved: bool = True
 
 
@@ -182,11 +184,17 @@ def ask(inquiry: Inquiry):
             "SELECT * FROM requests WHERE question_key = ? AND scope = ? AND resolved_at IS NOT NULL",
             (key, scope),
         ).fetchone()
+    result = catalog.find(inquiry.question, scope, inquiry.condition)
+    if row and not scope and result["state"] == "missing":
+        result = catalog.find(inquiry.question, row["source"], inquiry.condition)
+    if result["state"] in {"answer", "clarify"}:
+        if row:
+            result["quality_notice"] = (
+                "Сохранённый ответ службы качества требует сверки с действующим регламентом."
+            )
+        return result
     if row:
         return approved_result(row)
-    result = catalog.find(inquiry.question, scope, inquiry.condition)
-    if result["state"] in {"answer", "clarify"}:
-        return result
     with closing(connect()) as db, db:
         if inquiry.suggest_approved and not inquiry.condition:
             suggestions = approved_suggestions(db, inquiry.question, scope)
@@ -224,6 +232,29 @@ def resolve(request_id: int, resolution: Resolution, x_quality_token: Annotated[
     if resolution.source not in catalog.documents.values():
         raise HTTPException(422, "Укажите регламент из загруженного каталога.")
     with closing(connect()) as db, db:
+        ticket = db.execute(
+            "SELECT question, scope FROM requests "
+            "WHERE id = ? AND resolved_at IS NULL AND (scope = '' OR scope = ?)",
+            (request_id, resolution.source),
+        ).fetchone()
+        if not ticket:
+            raise HTTPException(409, "Запрос отсутствует, закрыт или привязан к другому регламенту.")
+        question = ticket["question"]
+        suffix = CONDITION_SUFFIX.search(question)
+        condition = suffix[1] if suffix else None
+        if suffix:
+            question = question[:suffix.start()]
+        reference = catalog.find(question, resolution.source, condition)
+        if reference["state"] != "answer" and not ticket["scope"]:
+            reference = catalog.find(question, None, condition)
+        if reference["state"] == "answer":
+            raise HTTPException(409, {
+                "message": (
+                    "В действующем регламенте уже есть ответ. Сверьте проект ответа с указанным пунктом. "
+                    "Публикация отдельного ответа для этого вопроса приостановлена."
+                ),
+                "evidence": reference["evidence"],
+            })
         updated = db.execute(
             "UPDATE requests SET answer = ?, source = ?, reference = ?, resolved_at = CURRENT_TIMESTAMP "
             "WHERE id = ? AND resolved_at IS NULL AND (scope = '' OR scope = ?)",

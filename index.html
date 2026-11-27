@@ -71,6 +71,19 @@
       for (const label of labels) append(list, 'li', label);
     }
 
+    function showEvidence(parent, evidence) {
+      for (const item of evidence) {
+        const citation = append(parent, 'div');
+        citation.className = 'citation';
+        append(citation, 'blockquote', item.quote);
+        const source = append(citation, 'a', item.source);
+        source.href = item.url;
+        source.target = '_blank';
+        source.rel = 'noopener noreferrer';
+        append(citation, 'p', item.section);
+      }
+    }
+
     async function api(url, body, token) {
       const headers = {'Content-Type': 'application/json'};
       if (token) headers['X-Quality-Token'] = token;
@@ -79,7 +92,12 @@
         body: body && JSON.stringify(body)
       });
       const data = await response.json();
-      if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'Проверьте введённые данные.');
+      if (!response.ok) {
+        const detail = data.detail;
+        const error = Error(typeof detail === 'string' ? detail : detail?.message || 'Проверьте введённые данные.');
+        error.evidence = detail?.evidence || [];
+        throw error;
+      }
       return data;
     }
 
@@ -93,6 +111,7 @@
         result.replaceChildren();
         if (data.state === 'answer') {
           append(result, 'h2', 'По регламенту');
+          if (data.quality_notice) append(result, 'p', data.quality_notice);
           if (data.branch_condition) {
             const status = data.branch_applies ? 'Условие выполнено' : 'Условие не выполнено';
             append(result, 'p', `${status}: ${data.branch_condition}`);
@@ -101,18 +120,10 @@
             showProcess(result, ['Отклонён', 'Изменить статус на «Новый»', 'Дополнить карточку'],
               'Возврат проекта в работу по п. 2.4');
           }
-          for (const item of data.evidence) {
-            const citation = append(result, 'div');
-            citation.className = 'citation';
-            append(citation, 'blockquote', item.quote);
-            const source = append(citation, 'a', item.source);
-            source.href = item.url;
-            source.target = '_blank';
-            source.rel = 'noopener noreferrer';
-            append(citation, 'p', item.section);
-          }
+          showEvidence(result, data.evidence);
         } else if (data.state === 'clarify') {
           append(result, 'h2', data.conditions ? 'Уточните условие' : 'Уточните процесс');
+          if (data.quality_notice) append(result, 'p', data.quality_notice);
           append(result, 'p', data.prompt || 'Вопрос относится к нескольким регламентам. Для какого процесса нужен ответ?');
           for (const option of (data.options || [])) {
             append(result, 'button', option).onclick = () => ask(question, option, condition);
@@ -195,17 +206,20 @@
           answer.minLength = 10;
           answer.maxLength = 3000;
           const save = append(form, 'button', 'Подтвердить и добавить в базу');
-          const message = append(form, 'p');
+          const message = append(form, 'div');
+          message.setAttribute('aria-live', 'polite');
           form.onsubmit = async event => {
             event.preventDefault();
             save.disabled = true;
+            message.replaceChildren();
             try {
               await api(`/api/quality/${item.id}`, {
                 source: source.value, reference: reference.value, answer: answer.value
               }, byId('token').value);
               await loadQueue();
             } catch (error) {
-              message.textContent = error.message;
+              append(message, 'p', error.message);
+              showEvidence(message, error.evidence || []);
               save.disabled = false;
             }
           };
